@@ -1,7 +1,4 @@
-# Go RAG System - Python to Go 转换项目
-
-这个项目将 Python 版本的 RAG (Retrieval-Augmented Generation) 系统成功转换为 Go 语言实现，保持了原有的核心功能和架构设计。
-
+# Go RAG System 
 ## 📋 项目概述
 
 本项目包含了一个完整的图RAG系统，结合了知识图谱检索、混合检索、智能路由和答案生成等核心模块：
@@ -305,3 +302,4 @@ fmt.Printf("查询复杂度: %.2f\n", analysis.QueryComplexity)
 fmt.Printf("关系密集度: %.2f\n", analysis.RelationshipIntensity)
 fmt.Printf("推荐策略: %s\n", analysis.RecommendedStrategy)
 ```
+
