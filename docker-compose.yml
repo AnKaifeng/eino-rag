@@ -1,0 +1,156 @@
+version: '3.8'
+
+name: rag-batch
+
+services:
+  # Neo4j 图数据库
+  neo4j:
+    image: neo4j:5.18
+    container_name: neo4j-db
+    ports:
+      - "8474:7474"   # HTTP Web UI (改为8474避免Windows端口保留冲突)
+      - "7687:7687"   # Bolt 协议端口
+    environment:
+      NEO4J_AUTH: neo4j/rootroot
+      NEO4J_dbms_connector_bolt_advertised__address: localhost:7687
+      # 允许从文件URL导入CSV
+      NEO4J_dbms_security_allow__csv__import__from__file__urls: "true"
+      # 设置导入目录
+      NEO4J_dbms_directories_import: "/import"
+      # 启用 APOC 插件
+      NEO4J_PLUGINS: '["apoc"]'
+      # APOC 配置
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_apoc_import_file_use__neo4j__config: "true"
+      # 内存配置
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 2G
+      NEO4J_dbms_memory_pagecache_size: 1G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_plugins:/plugins
+      # 将cypher文件夹映射到容器的import目录
+      - ./cypher:/import
+      - ./cypher:/scripts
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "rootroot", "RETURN 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - rag-network
+
+  # Neo4j 初始化服务
+  neo4j-init:
+    image: neo4j:5.18
+    container_name: neo4j-init
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    volumes:
+      - ./cypher:/scripts
+    command: >
+      sh -c "
+        echo 'Waiting for Neo4j to be ready...' &&
+        sleep 10 &&
+        echo 'Executing import script...' &&
+        cypher-shell -a bolt://neo4j:7687 -u neo4j -p rootroot -f /scripts/neo4j_import.cypher &&
+        echo 'Neo4j import completed!'
+      "
+    restart: "no"
+    networks:
+      - rag-network
+
+  # Milvus 依赖: etcd
+  etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - rag-network
+
+  # Milvus 依赖: MinIO
+  minio:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001"   # MinIO Console
+      - "9000:9000"   # MinIO API
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - rag-network
+
+  # Milvus 向量数据库
+  milvus-standalone:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.6.0
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530"  # Milvus gRPC端口
+      - "9091:9091"    # Milvus HTTP端口
+    depends_on:
+      - "etcd"
+      - "minio"
+    networks:
+      - rag-network
+
+  # Milvus 管理界面 Attu
+  attu:
+    container_name: attu
+    image: zilliz/attu:v2.6.0
+    environment:
+      MILVUS_URL: milvus-standalone:19530
+    ports:
+      - "8000:3000"   # Attu Web UI
+    depends_on:
+      - "milvus-standalone"
+    networks:
+      - rag-network
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_plugins:
+
+networks:
+  rag-network:
+    driver: bridge
+    name: rag-network 
